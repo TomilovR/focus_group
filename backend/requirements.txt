@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+pydantic
+pandas
+numpy
+faker
+sqlalchemy
+openai
+python-dotenv

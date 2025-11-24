@@ -1,0 +1,94 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;900&family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&display=swap');
+
+html {
+  scroll-behavior: smooth;
+  scroll-snap-type: y proximity;
+  scrollbar-width: none;
+  /* Firefox */
+}
+
+body::-webkit-scrollbar {
+  display: none;
+  /* Chrome, Safari, Opera */
+}
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Invisible White Theme */
+    --background: 0 0% 100%;
+    /* Pure White */
+    --foreground: 0 0% 0%;
+    /* Pure Black */
+
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 0%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 0%;
+
+    --primary: 0 0% 0%;
+    /* Black */
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 0 0% 96%;
+    /* Very light gray for hover states */
+    --secondary-foreground: 0 0% 0%;
+
+    --muted: 0 0% 60%;
+    /* Medium Gray */
+    --muted-foreground: 0 0% 40%;
+
+    --accent: 0 0% 96%;
+    --accent-foreground: 0 0% 0%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 0 0% 92%;
+    /* Extremely subtle if needed */
+    --input: 0 0% 92%;
+    --ring: 0 0% 0%;
+
+    --radius: 0.25rem;
+  }
+}
+
+@layer base {
+  body {
+    @apply bg-background text-foreground antialiased tracking-tight overflow-x-hidden;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    @apply font-serif tracking-tight leading-tight;
+  }
+}
+
+@layer components {
+  .invisible-input {
+    @apply bg-transparent border-none outline-none w-full p-0 placeholder:text-muted-foreground/40 transition-all duration-200 focus:ring-0 focus:border-none;
+  }
+
+  .btn-tactile {
+    @apply transition-transform duration-200 hover:scale-[1.02] active:scale-[0.98] cursor-pointer;
+  }
+}
+
+@layer utilities {
+  .nav-link {
+    @apply text-muted-foreground hover:text-foreground transition-colors duration-200 font-medium text-xl font-serif lowercase py-2 block;
+  }
+
+  .nav-link-active {
+    @apply text-foreground font-semibold;
+  }
+}
