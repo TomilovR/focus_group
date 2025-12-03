@@ -1,6 +1,12 @@
 from faker import Faker
 import random
-from backend.database import SessionLocal, init_db, AudienceModel, PersonaModel
+import sys
+import os
+
+# Add current directory to path to allow imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from database import SessionLocal, init_db, AudienceModel, PersonaModel
 
 fake = Faker('ru_RU')
 
@@ -9,13 +15,10 @@ def populate():
     init_db()
     db = SessionLocal()
     
-    # Clear existing data (optional, but good for clean state)
-    # db.query(PersonaModel).delete()
-    # db.query(AudienceModel).delete()
-    # db.commit()
-    
+    # Check if audiences already exist
     if db.query(AudienceModel).count() > 0:
         print("Audiences already exist. Skipping population.")
+        db.close()
         return
 
     audiences_config = [
@@ -65,37 +68,45 @@ def populate():
     
     persona_id_counter = 1
     
-    for config in audiences_config:
-        audience = AudienceModel(
-            name=config["name"],
-            type=config["type"],
-            description=f"Target audience for {config['name']}"
-        )
-        db.add(audience)
-        db.flush() # Get ID
-        
-        print(f"  - Creating '{config['name']}' with {config['count']} personas...")
-        
-        for _ in range(config["count"]):
-            role_en, role_ru = random.choice(config["roles"])
-            industry = random.choice(config["industries"])
-            
-            persona = PersonaModel(
-                id=str(persona_id_counter),
-                audience_id=audience.id,
-                name=fake.name(),
-                role=role_en,
-                company=f"{fake.company()} ({industry})",
-                avatar=random.choice(config["avatars"]),
-                psychographics=random.choice(PSYCHOGRAPHICS),
-                past_behavior=f"Часто открывает письма про {industry}, но редко отвечает."
+    try:
+        for config in audiences_config:
+            audience = AudienceModel(
+                name=config["name"],
+                type=config["type"],
+                description=f"Target audience for {config['name']}"
             )
-            db.add(persona)
-            persona_id_counter += 1
+            db.add(audience)
+            db.flush() # Get ID
             
-    db.commit()
-    print("Done! Database populated.")
-    db.close()
+            print(f"  - Creating '{config['name']}' with {config['count']} personas...")
+            
+            for _ in range(config["count"]):
+                role_en, role_ru = random.choice(config["roles"])
+                industry = random.choice(config["industries"])
+                
+                persona = PersonaModel(
+                    id=str(persona_id_counter),
+                    audience_id=audience.id,
+                    name=fake.name(),
+                    role=role_en,
+                    company=f"{fake.company()} ({industry})",
+                    avatar=random.choice(config["avatars"]),
+                    psychographics=random.choice(PSYCHOGRAPHICS),
+                    past_behavior=f"Часто открывает письма про {industry}, но редко отвечает."
+                )
+                db.add(persona)
+                persona_id_counter += 1
+                
+        db.commit()
+        print("Done! Database populated.")
+        print(f"Created {len(audiences_config)} audiences with {persona_id_counter - 1} personas total.")
+        
+    except Exception as e:
+        print(f"Error during population: {e}")
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 if __name__ == "__main__":
     populate()
