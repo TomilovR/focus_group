@@ -1,10 +1,12 @@
 import json
 import time
+import re
 from typing import List
 from models import EmailDraft, Persona, SimulationResult, Response, Metrics, Insight
-from llm_service import BaseLLM, MockLLM, OpenAILLM, EmbeddingService
+from llm_service import BaseLLM, MockLLM, OpenAILLM, EmbeddingService, LLMError
 from profiles import generate_personas
 from prompts import SimulationPrompts
+from config import logger
 
 class Simulator:
     def __init__(self, llm: BaseLLM = None):
@@ -13,13 +15,56 @@ class Simulator:
         else:
             try:
                 self.llm = OpenAILLM()
-            except ImportError:
-                print("OpenAI library not found, falling back to MockLLM")
+                logger.info("Initialized OpenAI LLM for simulation")
+            except Exception as e:
+                logger.warning(f"Failed to initialize OpenAI LLM: {e}, falling back to MockLLM")
                 self.llm = MockLLM()
         
         self.embedding_service = EmbeddingService()
 
+    def _parse_llm_json(self, llm_response: str, fallback: dict = None) -> dict:
+        """
+        Robust JSON parser for LLM responses.
+        Handles markdown code blocks, extra text, and malformed JSON.
+        """
+        if not llm_response:
+            logger.warning("Empty LLM response received")
+            return fallback or {}
+        
+        try:
+            # Remove markdown code blocks
+            cleaned = llm_response.strip()
+            cleaned = re.sub(r'^```json\s*', '', cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r'^```\s*', '', cleaned)
+            cleaned = re.sub(r'\s*```$', '', cleaned)
+            cleaned = cleaned.strip()
+            
+            # Try direct JSON parse first
+            try:
+                return json.loads(cleaned)
+            except json.JSONDecodeError:
+                pass
+            
+            # Extract JSON object using regex
+            json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', cleaned, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+                return json.loads(json_str)
+            
+            # Try to find JSON array
+            array_match = re.search(r'\[[^\[\]]*(?:\{[^{}]*\}[^\[\]]*)*\]', cleaned, re.DOTALL)
+            if array_match:
+                return {"data": json.loads(array_match.group(0))}
+            
+            logger.error(f"Could not extract valid JSON from: {llm_response[:200]}...")
+            return fallback or {}
+            
+        except Exception as e:
+            logger.error(f"JSON parsing failed: {e}. Response: {llm_response[:200]}...")
+            return fallback or {}
+
     def run_simulation_stream(self, draft: EmailDraft):
+        logger.info(f"Starting simulation for audience: {draft.audience}")
         personas = generate_personas(draft.sample_size, audience_id=draft.audience)
         responses = []
         
@@ -32,25 +77,39 @@ class Simulator:
         forward_count = 0
 
         total = len(personas)
+        logger.info(f"Simulating {total} personas")
 
         for i, p in enumerate(personas):
-            response = self._simulate_single_persona(draft, p)
-            responses.append(response)
-            
-            # Update counts
-            if response.action == 'opened': open_count += 1
-            if response.action == 'clicked': click_count += 1
-            if response.action == 'replied': reply_count += 1
-            if response.action == 'spam': spam_count += 1
-            if response.action == 'ignored': ignore_count += 1
-            
-            # Heuristics for other metrics based on action
-            if response.action in ['opened', 'clicked', 'replied']:
-                read_count += 1
-            
-            # Random forward
-            if response.action == 'clicked' and hash(p.id) % 5 == 0:
-                forward_count += 1
+            try:
+                response = self._simulate_single_persona(draft, p)
+                responses.append(response)
+                
+                # Update counts
+                if response.action == 'opened': open_count += 1
+                if response.action == 'clicked': click_count += 1
+                if response.action == 'replied': reply_count += 1
+                if response.action == 'spam': spam_count += 1
+                if response.action == 'ignored': ignore_count += 1
+                
+                # Heuristics for other metrics based on action
+                if response.action in ['opened', 'clicked', 'replied']:
+                    read_count += 1
+                
+                # Random forward
+                if response.action == 'clicked' and hash(p.id) % 5 == 0:
+                    forward_count += 1
+                
+            except Exception as e:
+                logger.error(f"Error simulating persona {p.name}: {e}")
+                # Add fallback response
+                responses.append(Response(
+                    persona=p,
+                    action='ignored',
+                    sentiment='neutral',
+                    comment='Simulation error occurred',
+                    detailedReasoning=f'Error: {str(e)}'
+                ))
+                ignore_count += 1
             
             # Yield progress
             yield {
@@ -70,6 +129,7 @@ class Simulator:
             readRate=int((read_count / total) * 100) if total > 0 else 0
         )
 
+        logger.info(f"Simulation metrics: {metrics.dict()}")
         insights = self._generate_insights(draft, metrics, responses)
 
         result = SimulationResult(
@@ -84,6 +144,7 @@ class Simulator:
             "type": "result",
             "data": result.dict()
         }
+        logger.info("Simulation completed successfully")
 
     def _simulate_single_persona(self, draft: EmailDraft, persona: Persona) -> Response:
         # Calculate relevance score
@@ -95,10 +156,25 @@ class Simulator:
         
         try:
             res_a_str = self.llm.predict(prompt_a)
-            res_a_str = res_a_str.replace("```json", "").replace("```", "").strip()
-            res_a = json.loads(res_a_str)
-        except:
-            res_a = {"action": "ignored", "reason": "Failed to parse decision", "thought_process": "Error parsing LLM response"}
+            res_a = self._parse_llm_json(res_a_str, fallback={
+                "action": "ignored", 
+                "reason": "Unable to parse response",
+                "thought_process": "LLM response parsing failed"
+            })
+        except LLMError as e:
+            logger.error(f"LLM error in Phase A for {persona.name}: {e}")
+            res_a = {
+                "action": "ignored", 
+                "reason": "LLM unavailable",
+                "thought_process": str(e)
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error in Phase A for {persona.name}: {e}")
+            res_a = {
+                "action": "ignored", 
+                "reason": "Processing error",
+                "thought_process": str(e)
+            }
         
         action = res_a.get("action", "ignored").lower()
         if action not in ['opened', 'ignored', 'spam']:
@@ -109,19 +185,21 @@ class Simulator:
         comment = reason
         
         if action == "opened":
-            # Phase B: Reading (Optional, currently just for internal state)
-            # prompt_b = SimulationPrompts.read_email(persona, draft)
-            # res_b = ... 
-            
             # Phase C: Action
             prompt_c = SimulationPrompts.take_action(persona, draft)
             
             try:
                 res_c_str = self.llm.predict(prompt_c)
-                res_c_str = res_c_str.replace("```json", "").replace("```", "").strip()
-                res_c = json.loads(res_c_str)
-            except:
-                res_c = {"final_action": "opened", "internal_monologue": "Undecided"}
+                res_c = self._parse_llm_json(res_c_str, fallback={
+                    "final_action": "opened",
+                    "internal_monologue": "Read but no action taken"
+                })
+            except LLMError as e:
+                logger.error(f"LLM error in Phase C for {persona.name}: {e}")
+                res_c = {"final_action": "opened", "internal_monologue": "LLM unavailable"}
+            except Exception as e:
+                logger.error(f"Unexpected error in Phase C for {persona.name}: {e}")
+                res_c = {"final_action": "opened", "internal_monologue": "Processing error"}
             
             final_action = res_c.get("final_action", "opened").lower()
             if final_action in ['clicked', 'replied']:
@@ -133,9 +211,9 @@ class Simulator:
         return Response(
             persona=persona,
             action=action,
-            sentiment='neutral', # TODO: Analyze sentiment
+            sentiment='neutral',
             comment=comment or "No comment",
-            detailedReasoning=detailed_reasoning
+            detailedReasoning=detailed_reasoning or "No detailed reasoning"
         )
 
     def _generate_insights(self, draft: EmailDraft, metrics: Metrics, responses: list) -> List[Insight]:
@@ -145,45 +223,32 @@ class Simulator:
         try:
             prompt = SimulationPrompts.analyze_results(draft, metrics, responses)
             llm_response = self.llm.predict(prompt)
-            print(f"DEBUG: LLM Raw Response for Insights: {llm_response}") # Debug print
+            logger.debug(f"LLM insights response length: {len(llm_response)}")
             
-            import json
-            import re
+            data = self._parse_llm_json(llm_response)
             
-            # Use regex to find the JSON object
-            json_match = re.search(r'\{.*\}', llm_response, re.DOTALL)
-            
-            if json_match:
-                cleaned_response = json_match.group(0)
-                try:
-                    data = json.loads(cleaned_response)
-                except json.JSONDecodeError:
-                    print("DEBUG: JSON decode failed, trying ast.literal_eval")
-                    import ast
-                    data = ast.literal_eval(cleaned_response)
-                
-                if "insights" in data:
-                    for item in data["insights"]:
-                        insight_type = item.get("type", "warning").lower()
-                        if insight_type == 'issue':
-                            insight_type = 'negative'
-                        elif insight_type not in ['positive', 'negative', 'warning']:
-                            insight_type = 'warning'
+            if data and "insights" in data:
+                for item in data["insights"]:
+                    insight_type = item.get("type", "warning").lower()
+                    if insight_type == 'issue':
+                        insight_type = 'negative'
+                    elif insight_type not in ['positive', 'negative', 'warning']:
+                        insight_type = 'warning'
 
-                        insights.append(Insight(
-                            type=insight_type,
-                            title=item.get("title", "Insight"),
-                            description=item.get("description", "")
-                        ))
-                    print("Generated smart insights via LLM.")
+                    insights.append(Insight(
+                        type=insight_type,
+                        title=item.get("title", "Insight"),
+                        description=item.get("description", "")
+                    ))
+                    
+                if insights:
+                    logger.info(f"Generated {len(insights)} smart insights via LLM")
                     return insights
-            else:
-                print("DEBUG: No JSON found in LLM response.")
+            
+            logger.warning("LLM response did not contain valid insights, using heuristics")
                 
         except Exception as e:
-            print(f"Failed to generate smart insights: {e}. Falling back to heuristics.")
-            import traceback
-            traceback.print_exc()
+            logger.warning(f"Failed to generate smart insights: {e}. Falling back to heuristics.")
         
         # Fallback Heuristics
         if metrics.openRate < 20:
@@ -205,5 +270,13 @@ class Simulator:
                 title='Высокий риск спама',
                 description='Многие получатели отметили письмо как спам. Проверьте стоп-слова.'
             ))
+        
+        if metrics.clickRate > 15:
+            insights.append(Insight(
+                type='positive',
+                title='Хороший Click Rate',
+                description='CTA эффективен и побуждает к действию.'
+            ))
             
+        logger.info(f"Generated {len(insights)} heuristic insights")
         return insights
